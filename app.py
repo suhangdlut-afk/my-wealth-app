@@ -5,11 +5,12 @@ import re
 from datetime import datetime
 
 # ==========================================
-# 1. 动态金融数据引擎
+# 1. 动态金融数据引擎 (同步 2026 最新调息)
 # ==========================================
 class LiveRateEngine:
     def __init__(self, fd_input_rate):
         self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        # 2.0 版 UOB/OCBC 基础逻辑
         self.uob_tiers = [(30000, 0.03), (30000, 0.04), (65000, 0.05), (25000, 0.06)]
         self.ocbc_bonus = {"salary": 0.025, "save": 0.015, "spend": 0.006}
         self.fd_rate = fd_input_rate / 100 
@@ -27,7 +28,7 @@ class LiveRateEngine:
         except: return False
 
 # ==========================================
-# 2. 核心分配算法
+# 2. 核心分配算法 (ZeroDivision 防护)
 # ==========================================
 def get_uob_stats(amt, sal, spd, tiers):
     if amt <= 0: return 0.0, 0.0005
@@ -57,8 +58,8 @@ def smart_allocate(total_amt, sal, total_spd, sav, engine):
     _, o_eir = get_ocbc_stats(100000, sal, ocbc_s, sav, engine.ocbc_bonus)
     
     options = [
-        {"id": "UOB", "name": "UOB One", "eir": u_eir, "cap": 150000},
-        {"id": "OCBC", "name": "OCBC 360", "eir": o_eir, "cap": 100000},
+        {"id": "UOB", "name": "UOB One (150k)", "eir": u_eir, "cap": 150000},
+        {"id": "OCBC", "name": "OCBC 360 (100k)", "eir": o_eir, "cap": 100000},
         {"id": "FD", "name": "定存 / T-Bills", "eir": engine.fd_rate, "cap": 9999999}
     ]
     sorted_opts = sorted(options, key=lambda x: x['eir'], reverse=True)
@@ -75,67 +76,65 @@ def smart_allocate(total_amt, sal, total_spd, sav, engine):
     return (alloc, ui + oi + fi)
 
 # ==========================================
-# 3. UI 交互与审计
+# 3. UI 交互与审计报告
 # ==========================================
 st.set_page_config(page_title="SG WealthGuard PRO", layout="centered")
 st.title("🇸🇬 SG WealthGuard PRO")
 
 with st.sidebar:
-    st.header("👤 财务参数")
-    amt = st.number_input("💰 存款总额 (SGD)", value=250000.0)
-    sal = st.number_input("🏦 月薪入账 (SGD)", value=10000.0)
+    st.header("👤 个人基础财务")
+    amt = st.number_input("💰 准备存入的总额 (SGD)", value=250000.0)
+    sal = st.number_input("🏦 每月实发薪水 (SGD)", value=10000.0)
     sav = st.checkbox("OCBC 360 每月增存 ≥$500", value=True)
-    fd_val = st.slider("📈 市场定存利率 (%)", 2.0, 4.5, 3.2, 0.1)
+    fd_val = st.slider("📈 市场外部利率参考 (%)", 2.0, 4.5, 3.2, 0.1)
     
     st.divider()
-    st.header("⚖️ 消费损益审计器")
-    spd_1 = st.number_input("输入消费方案 A (SGD)", value=800)
-    spd_2 = st.number_input("输入消费方案 B (SGD)", value=1000)
+    st.header("⚖️ 消费损益对冲审计")
+    spd_natural = st.number_input("🍀 平时自然消费 (SGD)", value=800)
+    spd_forced = st.number_input("🔥 强行凑单金额 (SGD)", value=1000)
 
 engine = LiveRateEngine(fd_val)
 engine.sync_rates()
 
-if st.button("🚀 开始深度损益分析", use_container_width=True):
-    # --- 逻辑修正：自动识别低消费和高消费 ---
-    spd_low = min(spd_1, spd_2)
-    spd_high = max(spd_1, spd_2)
+if st.button("🚀 进行深度盈亏审计", use_container_width=True):
+    # 逻辑核心：对比“自然”与“强行”
+    alloc_n, int_n = smart_allocate(amt, sal, spd_natural, sav, engine)
+    alloc_f, int_f = smart_allocate(amt, sal, spd_forced, sav, engine)
     
-    alloc_low, int_low = smart_allocate(amt, sal, spd_low, sav, engine)
-    alloc_high, int_high = smart_allocate(amt, sal, spd_high, sav, engine)
-    
-    # 损益计算
-    monthly_int_gain = (int_high - int_low) / 12
-    extra_cost = spd_high - spd_low
-    net_profit = monthly_int_gain - extra_cost
+    monthly_gain = (int_f - int_n) / 12
+    extra_cost = spd_forced - spd_natural
+    net_impact = monthly_gain - extra_cost
 
-    # 1. 审计决策区
-    st.subheader("📊 消费凑单决策报告")
-    if extra_cost == 0:
-        st.info("两个方案消费额相同，无损益差。")
-    elif net_profit > 0:
-        st.success(f"✅ **建议凑单**！多花的 ${extra_cost:.0f} 换回了月均 ${monthly_int_gain:.2f} 利息，净赚 **${net_profit:.2f}/月**。")
+    # --- 审计结论 ---
+    st.subheader("🧐 审计结论")
+    if net_impact > 0:
+        st.success(f"**【建议凑单】** 凑单到 ${spd_forced} 是划算的！多拿的利息不仅覆盖了多花的 ${extra_cost}，还让你每月额外净赚 **${net_impact:.2f}**。")
+        final_alloc, final_int = alloc_f, int_f
+        final_spd = spd_forced
     else:
-        st.error(f"🛑 **不建议凑单**！多花的 ${extra_cost:.0f} 仅换回月均 ${monthly_int_gain:.2f} 利息，亏损 **${abs(net_profit):.2f}/月**。")
+        st.error(f"**【不要凑单】** 这是一笔亏本买卖！为了多拿 ${monthly_gain:.2f} 利息，你多花了 ${extra_cost}，相当于每月倒贴 **${abs(net_impact):.2f}**。建议维持自然消费 **${spd_natural}**。")
+        final_alloc, final_int = alloc_n, int_n
+        final_spd = spd_natural
 
-    # 2. 对比细节区
+    # --- 对比细节 ---
     st.write("---")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.write(f"**方案 A: ${spd_low} 消费**")
-        st.metric("年预估利息", f"${int_low:,.2f}")
-    with c2:
-        st.write(f"**方案 B: ${spd_high} 消费**")
-        st.metric("年预估利息", f"${int_high:,.2f}", delta=f"${int_high - int_low:,.2f}")
+    col1, col2 = st.columns(2)
+    col1.metric("自然消费方案", f"${int_n:,.2f} /年", f"消费 ${spd_natural}")
+    col2.metric("强行凑单方案", f"${int_f:,.2f} /年", f"消费 ${spd_forced}", delta=f"${int_f - int_n:,.2f}")
 
-    # 3. 资产分布表
-    st.subheader("📍 推荐资产分布")
-    final_alloc = alloc_high if net_profit > 0 else alloc_low
+    # --- 最终执行表格 ---
+    st.subheader("📍 最终推荐资产分布")
+    st.caption(f"已根据审计结论，自动切换至{'凑单' if net_impact > 0 else '自然'}消费模式 (月均刷卡: ${final_spd})")
+    
     st.table(pd.DataFrame([
-        {"项目": "UOB One", "本金建议": f"${final_alloc['UOB']:,.0f}"},
-        {"项目": "OCBC 360", "本金建议": f"${final_alloc['OCBC']:,.0f}"},
-        {"项目": "定存 / T-Bills", "本金建议": f"${final_alloc['FD']:,.0f}"}
+        {"存放账户": "UOB One (150k)", "建议金额": f"${final_alloc['UOB']:,.0f}"},
+        {"存放账户": "OCBC 360 (100k)", "建议金额": f"${final_alloc['OCBC']:,.0f}"},
+        {"存放账户": "外部定存 / T-Bills", "建议金额": f"${final_alloc['FD']:,.0f}"}
     ]))
 
-    with st.expander("🔗 官方参考网址"):
-        st.markdown("[UOB One](https://www.uob.com.sg/personal/save/cheque-savings/uob-one-account.page)")
-        st.markdown("[OCBC 360](https://www.ocbc.com/personal-banking/deposits/360-savings-account)")
+    with st.expander("🔗 官方数据来源验证"):
+        st.markdown("[UOB One 官网政策](https://www.uob.com.sg/personal/save/cheque-savings/uob-one-account.page)")
+        st.markdown("[OCBC 360 官网政策](https://www.ocbc.com/personal-banking/deposits/360-savings-account)")
+
+if datetime.now().month == 4:
+    st.warning("📅 5月1日新加坡银行降息预警已激活。")
