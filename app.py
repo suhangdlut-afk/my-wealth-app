@@ -5,134 +5,133 @@ import re
 from datetime import datetime
 
 # ==========================================
-# 1. 动态金融数据引擎 (含实时抓取)
+# 1. 动态金融数据引擎
 # ==========================================
 class LiveRateEngine:
-    def __init__(self):
+    def __init__(self, fd_input_rate):
         self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        # 默认 2026 4月数据兜底
         self.uob_tiers = [(30000, 0.03), (30000, 0.04), (65000, 0.05), (25000, 0.06)]
         self.ocbc_bonus = {"salary": 0.025, "save": 0.015, "spend": 0.006}
-        self.fd_rate = 0.032
+        self.fd_rate = fd_input_rate / 100 
 
     @st.cache_data(ttl=3600)
-    def sync_all_rates(_self):
+    def sync_rates(_self):
         url = "https://www.singsaver.com.sg/blog/best-savings-accounts-singapore"
         try:
             r = requests.get(url, headers=_self.headers, timeout=8)
-            content = r.text
-            uob_match = re.findall(r'UOB One.*?(\d+\.\d+)%', content, re.S)
+            uob_match = re.findall(r'UOB One.*?(\d+\.\d+)%', r.text, re.S)
             if uob_match:
                 factor = (float(uob_match[0])/100) / 0.06
                 _self.uob_tiers = [(cap, rate * factor) for cap, rate in _self.uob_tiers]
-            ocbc_match = re.search(r'OCBC 360.*?Salary.*?(\d+\.\d+)%.*?Save.*?(\d+\.\d+)%', content, re.S)
-            if ocbc_match:
-                _self.ocbc_bonus["salary"] = float(ocbc_match.group(1)) / 100
-                _self.ocbc_bonus["save"] = float(ocbc_match.group(2)) / 100
             return True
         except: return False
 
 # ==========================================
-# 2. 核心计算逻辑 (含低消费保护)
+# 2. 核心算法 (保持阶梯比价逻辑)
 # ==========================================
-def get_uob_yield(amount, sal, spd, tiers):
-    # 门槛校验：消费 < 500 或 薪水 < 1600 则跌入基础利率 0.05%
-    if spd < 500 or sal < 1600: return amount * 0.0005
-    total, rem = 0, amount
+def get_uob_stats(amt, sal, spd, tiers):
+    if amt <= 0: return 0, 0
+    if spd < 500 or sal < 1600: return amt * 0.0005, 0.0005
+    total_int, rem = 0, amt
     for cap, rate in tiers:
         active = min(rem, cap)
-        total += active * rate
+        total_int += active * rate
         rem -= active
-    return total + (max(rem, 0) * 0.0005)
+    total_int += rem * 0.0005
+    return total_int, total_int / amt
 
-def get_ocbc_yield(amount, sal, spd, sav, bonus):
-    # 门槛校验：消费 < 500 则仅有基础利率 0.05%
-    if spd < 500: return amount * 0.0005
-    rate = 0.0005 + bonus["spend"] + (bonus["salary"] if sal >= 1600 else 0) + (bonus["save"] if sav else 0)
-    return min(amount, 100000) * rate + max(amount-100000, 0) * 0.0005
+def get_ocbc_stats(amt, sal, spd, sav, bonus):
+    if amt <= 0: return 0, 0
+    rate = 0.0005
+    if spd >= 500: rate += bonus["spend"]
+    if sal >= 1600: rate += bonus["salary"]
+    if sav: rate += bonus["save"]
+    high_amt = min(amt, 100000)
+    total_int = high_amt * rate + (amt - high_amt) * 0.0005
+    return total_int, total_int / amt
 
-def smart_allocate(amt, sal, spd, sav, engine):
-    # 预处理：判断是否触发门槛异常
-    is_low_spend = (spd < 500)
-    
-    if is_low_spend:
-        # 消费不足时，失去套利空间，按容量优先填 UOB (150k)
-        uob_amt = min(amt, 150000)
-        ocbc_amt = min(max(amt - 150000, 0), 100000)
-        uob_first = True
-    else:
-        # 正常比价模式
-        u_eir = get_uob_yield(150000, sal, spd, engine.uob_tiers) / 150000
-        o_eir = get_ocbc_yield(100000, sal, spd, sav, engine.ocbc_bonus) / 100000
-        
-        if u_eir >= o_eir:
-            uob_amt = min(amt, 150000)
-            ocbc_amt = min(max(amt - 150000, 0), 100000)
-            uob_first = True
-        else:
-            ocbc_amt = min(amt, 100000)
-            uob_amt = min(max(amt - 100000, 0), 150000)
-            uob_first = False
-
-    fd_amt = max(amt - uob_amt - ocbc_amt, 0)
-    u_i = get_uob_yield(uob_amt, sal, spd, engine.uob_tiers)
-    o_i = get_ocbc_yield(ocbc_amt, sal, spd, sav, engine.ocbc_bonus)
-    f_i = fd_amt * engine.fd_rate
-    
-    return uob_amt, ocbc_amt, fd_amt, u_i, o_i, f_i, uob_first, is_low_spend
+def smart_allocate(total_amt, sal, spd, sav, engine):
+    _, u_eir = get_uob_stats(150000, sal, spd, engine.uob_tiers)
+    _, o_eir = get_ocbc_stats(100000, sal, spd, sav, engine.ocbc_bonus)
+    f_eir = engine.fd_rate
+    options = [
+        {"id": "UOB", "name": "UOB One (账户)", "eir": u_eir, "cap": 150000},
+        {"id": "OCBC", "name": "OCBC 360 (账户)", "eir": o_eir, "cap": 100000},
+        {"id": "FD", "name": "定存 / T-Bills", "eir": f_eir, "cap": 9999999}
+    ]
+    sorted_opts = sorted(options, key=lambda x: x['eir'], reverse=True)
+    rem = total_amt
+    allocation = {"UOB": 0, "OCBC": 0, "FD": 0}
+    for opt in sorted_opts:
+        if rem <= 0: break
+        take = min(rem, opt['cap'])
+        allocation[opt['id']] = take
+        rem -= take
+    u_i, _ = get_uob_stats(allocation["UOB"], sal, spd, engine.uob_tiers)
+    o_i, _ = get_ocbc_stats(allocation["OCBC"], sal, spd, sav, engine.ocbc_bonus)
+    f_i = allocation["FD"] * engine.fd_rate
+    return allocation, u_i, o_i, f_i, sorted_opts[0]['name']
 
 # ==========================================
 # 3. Streamlit 界面
 # ==========================================
 st.set_page_config(page_title="SG WealthGuard PRO", layout="centered")
-
-if 'engine' not in st.session_state:
-    st.session_state.engine = LiveRateEngine()
-    st.session_state.is_live = st.session_state.engine.sync_all_rates()
-
-engine = st.session_state.engine
-
 st.title("🇸🇬 SG WealthGuard PRO")
-st.caption(f"数据状态: {'🟢 实时同步' if st.session_state.is_live else '🟡 离线模式'} | 决策模式: 智能比价优先")
 
+# --- 新增：官方查阅中心 (侧边栏) ---
 with st.sidebar:
-    st.header("👤 财务数据输入")
+    st.header("🔗 官方数据查阅")
+    with st.expander("点击查看原始政策网址"):
+        st.markdown("""
+        **银行官网 (利息计算器):**
+        * [UOB One Account 官网](https://www.uob.com.sg/personal/save/cheque-savings/uob-one-account.page)
+        * [OCBC 360 Account 官网](https://www.ocbc.com/personal-banking/deposits/360-savings-account)
+        
+        **定存与国库券 (实时利率):**
+        * [MAS T-Bills 竞标结果](https://www.mas.gov.sg/bonds-and-bills/auctions-and-issuance-calendar)
+        * [SingSaver 定存对比汇总](https://www.singsaver.com.sg/blog/best-fixed-deposit-rates-singapore)
+        
+        **第三方监控:**
+        * [Seedly 社区评测](https://seedly.sg/reviews/savings-accounts/)
+        """)
+    st.divider()
+    
+    st.header("👤 财务参数设置")
     amt = st.number_input("💰 存款总额 (SGD)", min_value=0.0, value=250000.0, step=1000.0)
     sal = st.number_input("🏦 月薪入账 (SGD)", min_value=0.0, value=10000.0)
     spd = st.slider("💳 月度消费 (SGD)", 0, 5000, 800)
-    sav_check = st.checkbox("OCBC 360：每月余额增长 ≥$500", value=True)
+    sav = st.checkbox("OCBC 360: 每月存入 ≥$500", value=True)
+    st.divider()
+    st.header("📈 定存基准调节")
+    fd_val = st.slider("当前市场定存利率 (%)", 2.0, 4.5, 3.2, 0.1)
 
-if st.button("🚀 生成资产最优分配清单", use_container_width=True):
-    u_a, o_a, f_a, u_i, o_i, f_i, uob_first, is_low = smart_allocate(amt, sal, spd, sav_check, engine)
+# 初始化与诊断
+engine = LiveRateEngine(fd_val)
+engine.sync_rates()
+
+if st.button("🚀 生成最优资产分配清单", use_container_width=True):
+    alloc, u_i, o_i, f_i, best = smart_allocate(amt, sal, spd, sav, engine)
     total_i = u_i + o_i + f_i
 
-    # 结果指标
+    # 指标看板
     c1, c2 = st.columns(2)
-    c1.metric("年度预计总收益", f"${total_i:,.2f}")
-    c2.metric("综合年化收益率", f"{(total_i/amt)*100:.2f}% p.a.")
+    c1.metric("年度预计利息", f"${total_i:,.2f}")
+    c2.metric("综合年化收益率", f"{(total_i/amt)*100:.2f}%")
 
-    if is_low:
-        st.error("🚨 **警告：消费未达标**。您的月度消费低于 $500，无法激活任何高息奖励。")
-    else:
-        st.info(f"✅ **智能决策**：当前系统优先填满 {'UOB One' if uob_first else 'OCBC 360'} 以获得更高 EIR。")
+    st.success(f"🏆 **决策建议**：当前第一优先级应存入 **{best}**")
 
-    st.subheader("📍 资金分布导航")
-    res_df = pd.DataFrame([
-        {"分配机构": "大华银行 (UOB One)", "金额": f"${u_a:,.0f}", "预期利息": f"${u_i:,.2f}"},
-        {"分配机构": "华侨银行 (OCBC 360)", "金额": f"${o_a:,.0f}", "预期利息": f"${o_i:,.2f}"},
-        {"分配机构": "溢出存储 (定存/T-Bills)", "金额": f"${f_a:,.0f}", "预期利息": f"${f_i:,.2f}"}
+    # 表格展示
+    df_res = pd.DataFrame([
+        {"项目": "UOB One (150k限额)", "存放金额": f"${alloc['UOB']:,.0f}", "预估利息": f"${u_i:,.2f}"},
+        {"项目": "OCBC 360 (100k限额)", "存放金额": f"${alloc['OCBC']:,.0f}", "预估利息": f"${o_i:,.2f}"},
+        {"项目": "定存 / T-Bills", "存放金额": f"${alloc['FD']:,.0f}", "预估利息": f"${f_i:,.2f}"}
     ])
-    st.table(res_df)
+    st.table(df_res)
 
-    # 指令区
-    with st.expander("💡 执行必看指令 (含工资对倒建议)"):
-        st.write("1. **薪水发放**：公司薪水发往 **OCBC 360**。")
-        st.write("2. **工资对倒**：每月从 OCBC 转账 **$1,601** 至 UOB，备注填写 **'SALARY'**。")
-        st.write("3. **消费分流**：确保两张关联卡每月分别刷满 $500。")
-        if is_low:
-            st.warning("提示：请务必确保月度消费达到 $500，否则年收益将损失巨大。")
+    with st.expander("💡 执行指令"):
+        st.write("1. 薪水发往 OCBC，每月对倒 $1,601 至 UOB (备注 'SALARY')。")
+        if spd < 500:
+            st.warning("⚠️ 消费不满 $500：UOB 已失效，资金已重定向至定存。")
 
-# 5月预警
 if datetime.now().month == 4:
-    st.warning("📅 **市场提示**：5月1日新加坡银行将迎来利率调整。届时程序将自动感知抓取并重置分配优先级。")
-
+    st.warning("📅 5月1日调息预警：系统将自动同步官网数据。您可以点击侧边栏链接手动核实官方公告。")
