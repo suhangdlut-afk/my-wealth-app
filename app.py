@@ -75,17 +75,12 @@ def smart_allocate(total_amt, sal, total_spd, sav, engine):
     return (alloc, ui + oi + fi)
 
 # ==========================================
-# 3. UI 交互与“反撸”对比逻辑
+# 3. UI 交互与审计
 # ==========================================
 st.set_page_config(page_title="SG WealthGuard PRO", layout="centered")
 st.title("🇸🇬 SG WealthGuard PRO")
 
 with st.sidebar:
-    st.header("🔗 官方参考")
-    with st.expander("查看网址"):
-        st.markdown("[UOB One](https://www.uob.com.sg/personal/save/cheque-savings/uob-one-account.page)")
-        st.markdown("[OCBC 360](https://www.ocbc.com/personal-banking/deposits/360-savings-account)")
-    
     st.header("👤 财务参数")
     amt = st.number_input("💰 存款总额 (SGD)", value=250000.0)
     sal = st.number_input("🏦 月薪入账 (SGD)", value=10000.0)
@@ -94,54 +89,53 @@ with st.sidebar:
     
     st.divider()
     st.header("⚖️ 消费损益审计器")
-    # 让用户自己定义两个场景进行对比
-    spd_base = st.number_input("1. 自然月消费 (原本就要花的钱)", value=800)
-    spd_target = st.number_input("2. 凑单后消费 (为了奖金强行的钱)", value=1000)
+    spd_1 = st.number_input("输入消费方案 A (SGD)", value=800)
+    spd_2 = st.number_input("输入消费方案 B (SGD)", value=1000)
 
 engine = LiveRateEngine(fd_val)
 engine.sync_rates()
 
 if st.button("🚀 开始深度损益分析", use_container_width=True):
-    # 场景一：自然消费
-    alloc_b, total_i_b = smart_allocate(amt, sal, spd_base, sav, engine)
-    # 场景二：凑单消费
-    alloc_t, total_i_t = smart_allocate(amt, sal, spd_target, sav, engine)
+    # --- 逻辑修正：自动识别低消费和高消费 ---
+    spd_low = min(spd_1, spd_2)
+    spd_high = max(spd_1, spd_2)
     
-    # 核心损益计算
-    monthly_interest_gain = (total_i_t - total_i_b) / 12
-    extra_spending = spd_target - spd_base
-    net_profit = monthly_interest_gain - extra_spending
+    alloc_low, int_low = smart_allocate(amt, sal, spd_low, sav, engine)
+    alloc_high, int_high = smart_allocate(amt, sal, spd_high, sav, engine)
+    
+    # 损益计算
+    monthly_int_gain = (int_high - int_low) / 12
+    extra_cost = spd_high - spd_low
+    net_profit = monthly_int_gain - extra_cost
 
-    # --- 审计结果区域 ---
+    # 1. 审计决策区
     st.subheader("📊 消费凑单决策报告")
-    
-    if net_profit > 0:
-        st.success(f"✅ **值得凑单**！多花的 ${extra_spending} 换回了 ${monthly_interest_gain:.2f} 利息，每月净赚 **${net_profit:.2f}**。")
+    if extra_cost == 0:
+        st.info("两个方案消费额相同，无损益差。")
+    elif net_profit > 0:
+        st.success(f"✅ **建议凑单**！多花的 ${extra_cost:.0f} 换回了月均 ${monthly_int_gain:.2f} 利息，净赚 **${net_profit:.2f}/月**。")
     else:
-        st.error(f"🛑 **不建议凑单**！多花的 ${extra_spending} 仅换回 ${monthly_interest_gain:.2f} 利息，每月亏损 **${abs(net_profit):.2f}**。建议维持 ${spd_base} 的自然消费。")
+        st.error(f"🛑 **不建议凑单**！多花的 ${extra_cost:.0f} 仅换回月均 ${monthly_int_gain:.2f} 利息，亏损 **${abs(net_profit):.2f}/月**。")
 
-    # 对比图表展示
+    # 2. 对比细节区
     st.write("---")
     c1, c2 = st.columns(2)
     with c1:
-        st.write(f"**场景 1: 自然消费 (${spd_base})**")
-        st.metric("年利息", f"${total_i_b:,.2f}")
-        st.metric("综合利率", f"{(total_i_b/amt)*100:.2f}%")
+        st.write(f"**方案 A: ${spd_low} 消费**")
+        st.metric("年预估利息", f"${int_low:,.2f}")
     with c2:
-        st.write(f"**场景 2: 凑单消费 (${spd_target})**")
-        st.metric("年利息", f"${total_i_t:,.2f}", delta=f"${total_i_t - total_i_b:,.2f}")
-        st.metric("综合利率", f"{(total_i_t/amt)*100:.2f}%")
+        st.write(f"**方案 B: ${spd_high} 消费**")
+        st.metric("年预估利息", f"${int_high:,.2f}", delta=f"${int_high - int_low:,.2f}")
 
-    st.subheader("📍 最终推荐资产分布")
-    st.write(f"*(基于方案 {'1' if net_profit <= 0 else '2'} )*")
-    final_alloc = alloc_b if net_profit <= 0 else alloc_t
+    # 3. 资产分布表
+    st.subheader("📍 推荐资产分布")
+    final_alloc = alloc_high if net_profit > 0 else alloc_low
     st.table(pd.DataFrame([
-        {"项目": "UOB One (150k)", "金额": f"${final_alloc['UOB']:,.0f}"},
-        {"项目": "OCBC 360 (100k)", "金额": f"${final_alloc['OCBC']:,.0f}"},
-        {"项目": "定存 / T-Bills", "金额": f"${final_alloc['FD']:,.0f}"}
+        {"项目": "UOB One", "本金建议": f"${final_alloc['UOB']:,.0f}"},
+        {"项目": "OCBC 360", "本金建议": f"${final_alloc['OCBC']:,.0f}"},
+        {"项目": "定存 / T-Bills", "本金建议": f"${final_alloc['FD']:,.0f}"}
     ]))
 
-    with st.expander("💡 为什么这么算？"):
-        st.write(f"1. 我们假设你的自然消费 ${spd_base} 是无法避免的支出。")
-        st.write(f"2. 为了拿奖励，你可能会产生额外的“无效消费” ${extra_spending}。")
-        st.write(f"3. 只有当银行多给你的月利息能够覆盖这笔额外支出时，凑单才是有意义的。")
+    with st.expander("🔗 官方参考网址"):
+        st.markdown("[UOB One](https://www.uob.com.sg/personal/save/cheque-savings/uob-one-account.page)")
+        st.markdown("[OCBC 360](https://www.ocbc.com/personal-banking/deposits/360-savings-account)")
