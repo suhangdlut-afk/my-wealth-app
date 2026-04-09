@@ -5,12 +5,11 @@ import re
 from datetime import datetime
 
 # ==========================================
-# 1. 动态金融数据引擎 (同步 2026 最新调息)
+# 1. 动态金融数据引擎
 # ==========================================
 class LiveRateEngine:
     def __init__(self, fd_input_rate):
         self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        # 2.0 版 UOB/OCBC 基础逻辑
         self.uob_tiers = [(30000, 0.03), (30000, 0.04), (65000, 0.05), (25000, 0.06)]
         self.ocbc_bonus = {"salary": 0.025, "save": 0.015, "spend": 0.006}
         self.fd_rate = fd_input_rate / 100 
@@ -28,7 +27,7 @@ class LiveRateEngine:
         except: return False
 
 # ==========================================
-# 2. 核心分配算法 (ZeroDivision 防护)
+# 2. 核心分配算法
 # ==========================================
 def get_uob_stats(amt, sal, spd, tiers):
     if amt <= 0: return 0.0, 0.0005
@@ -97,7 +96,6 @@ engine = LiveRateEngine(fd_val)
 engine.sync_rates()
 
 if st.button("🚀 进行深度盈亏审计", use_container_width=True):
-    # 逻辑核心：对比“自然”与“强行”
     alloc_n, int_n = smart_allocate(amt, sal, spd_natural, sav, engine)
     alloc_f, int_f = smart_allocate(amt, sal, spd_forced, sav, engine)
     
@@ -116,15 +114,24 @@ if st.button("🚀 进行深度盈亏审计", use_container_width=True):
         final_alloc, final_int = alloc_n, int_n
         final_spd = spd_natural
 
-    # --- 对比细节 ---
+    # --- 对比细节 (修复 TypeError) ---
     st.write("---")
     col1, col2 = st.columns(2)
-    col1.metric("自然消费方案", f"${int_n:,.2f} /年", f"消费 ${spd_natural}")
-    col2.metric("强行凑单方案", f"${int_f:,.2f} /年", f"消费 ${spd_forced}", delta=f"${int_f - int_n:,.2f}")
+    # 方案 A
+    col1.metric(
+        label=f"自然方案 (${spd_natural})", 
+        value=f"${int_n:,.2f} /年"
+    )
+    # 方案 B (将 delta 改为数值)
+    col2.metric(
+        label=f"凑单方案 (${spd_forced})", 
+        value=f"${int_f:,.2f} /年", 
+        delta=round(int_f - int_n, 2)
+    )
 
     # --- 最终执行表格 ---
     st.subheader("📍 最终推荐资产分布")
-    st.caption(f"已根据审计结论，自动切换至{'凑单' if net_impact > 0 else '自然'}消费模式 (月均刷卡: ${final_spd})")
+    st.caption(f"已根据审计结论，自动切换至{'凑单' if net_impact > 0 else '自然'}模式 (月均刷卡: ${final_spd})")
     
     st.table(pd.DataFrame([
         {"存放账户": "UOB One (150k)", "建议金额": f"${final_alloc['UOB']:,.0f}"},
@@ -132,9 +139,9 @@ if st.button("🚀 进行深度盈亏审计", use_container_width=True):
         {"存放账户": "外部定存 / T-Bills", "建议金额": f"${final_alloc['FD']:,.0f}"}
     ]))
 
-    with st.expander("🔗 官方数据来源验证"):
-        st.markdown("[UOB One 官网政策](https://www.uob.com.sg/personal/save/cheque-savings/uob-one-account.page)")
-        st.markdown("[OCBC 360 官网政策](https://www.ocbc.com/personal-banking/deposits/360-savings-account)")
+    with st.expander("🔗 官方数据验证"):
+        st.markdown("[UOB One](https://www.uob.com.sg/personal/save/cheque-savings/uob-one-account.page)")
+        st.markdown("[OCBC 360](https://www.ocbc.com/personal-banking/deposits/360-savings-account)")
 
 if datetime.now().month == 4:
-    st.warning("📅 5月1日新加坡银行降息预警已激活。")
+    st.warning("📅 5月1日调息预警。")
