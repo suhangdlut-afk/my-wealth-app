@@ -27,11 +27,11 @@ class LiveRateEngine:
         except: return False
 
 # ==========================================
-# 2. 核心算法 (保持阶梯比价逻辑)
+# 2. 核心算法 (精细化消费门槛)
 # ==========================================
-def get_uob_stats(amt, sal, spd, tiers):
-    if amt <= 0: return 0, 0
-    if spd < 500 or sal < 1600: return amt * 0.0005, 0.0005
+def get_uob_stats(amt, sal, spd_allocated, tiers):
+    # UOB 门槛：分配给 UOB 的消费必须 >= 500
+    if spd_allocated < 500 or sal < 1600: return amt * 0.0005, 0.0005
     total_int, rem = 0, amt
     for cap, rate in tiers:
         active = min(rem, cap)
@@ -40,26 +40,31 @@ def get_uob_stats(amt, sal, spd, tiers):
     total_int += rem * 0.0005
     return total_int, total_int / amt
 
-def get_ocbc_stats(amt, sal, spd, sav, bonus):
-    if amt <= 0: return 0, 0
+def get_ocbc_stats(amt, sal, spd_allocated, sav, bonus):
     rate = 0.0005
-    if spd >= 500: rate += bonus["spend"]
+    if spd_allocated >= 500: rate += bonus["spend"]
     if sal >= 1600: rate += bonus["salary"]
     if sav: rate += bonus["save"]
     high_amt = min(amt, 100000)
     total_int = high_amt * rate + (amt - high_amt) * 0.0005
     return total_int, total_int / amt
 
-def smart_allocate(total_amt, sal, spd, sav, engine):
-    _, u_eir = get_uob_stats(150000, sal, spd, engine.uob_tiers)
-    _, o_eir = get_ocbc_stats(100000, sal, spd, sav, engine.ocbc_bonus)
+def smart_allocate(total_amt, sal, total_spd, sav, engine):
+    # 策略：优先保证 UOB 的 500 消费，剩余给 OCBC
+    uob_spd = min(total_spd, 500)
+    ocbc_spd = max(total_spd - 500, 0)
+
+    _, u_eir = get_uob_stats(150000, sal, uob_spd, engine.uob_tiers)
+    _, o_eir = get_ocbc_stats(100000, sal, ocbc_spd, sav, engine.ocbc_bonus)
     f_eir = engine.fd_rate
+
     options = [
-        {"id": "UOB", "name": "UOB One (账户)", "eir": u_eir, "cap": 150000},
-        {"id": "OCBC", "name": "OCBC 360 (账户)", "eir": o_eir, "cap": 100000},
+        {"id": "UOB", "name": "UOB One", "eir": u_eir, "cap": 150000},
+        {"id": "OCBC", "name": "OCBC 360", "eir": o_eir, "cap": 100000},
         {"id": "FD", "name": "定存 / T-Bills", "eir": f_eir, "cap": 9999999}
     ]
     sorted_opts = sorted(options, key=lambda x: x['eir'], reverse=True)
+
     rem = total_amt
     allocation = {"UOB": 0, "OCBC": 0, "FD": 0}
     for opt in sorted_opts:
@@ -67,10 +72,11 @@ def smart_allocate(total_amt, sal, spd, sav, engine):
         take = min(rem, opt['cap'])
         allocation[opt['id']] = take
         rem -= take
-    u_i, _ = get_uob_stats(allocation["UOB"], sal, spd, engine.uob_tiers)
-    o_i, _ = get_ocbc_stats(allocation["OCBC"], sal, spd, sav, engine.ocbc_bonus)
+
+    u_i, _ = get_uob_stats(allocation["UOB"], sal, uob_spd, engine.uob_tiers)
+    o_i, _ = get_ocbc_stats(allocation["OCBC"], sal, ocbc_spd, sav, engine.ocbc_bonus)
     f_i = allocation["FD"] * engine.fd_rate
-    return allocation, u_i, o_i, f_i, sorted_opts[0]['name']
+    return allocation, u_i, o_i, f_i, sorted_opts[0]['name'], uob_spd, ocbc_spd
 
 # ==========================================
 # 3. Streamlit 界面
@@ -78,60 +84,49 @@ def smart_allocate(total_amt, sal, spd, sav, engine):
 st.set_page_config(page_title="SG WealthGuard PRO", layout="centered")
 st.title("🇸🇬 SG WealthGuard PRO")
 
-# --- 新增：官方查阅中心 (侧边栏) ---
 with st.sidebar:
-    st.header("🔗 官方数据查阅")
-    with st.expander("点击查看原始政策网址"):
-        st.markdown("""
-        **银行官网 (利息计算器):**
-        * [UOB One Account 官网](https://www.uob.com.sg/personal/save/cheque-savings/uob-one-account.page)
-        * [OCBC 360 Account 官网](https://www.ocbc.com/personal-banking/deposits/360-savings-account)
-        
-        **定存与国库券 (实时利率):**
-        * [MAS T-Bills 竞标结果](https://www.mas.gov.sg/bonds-and-bills/auctions-and-issuance-calendar)
-        * [SingSaver 定存对比汇总](https://www.singsaver.com.sg/blog/best-fixed-deposit-rates-singapore)
-        
-        **第三方监控:**
-        * [Seedly 社区评测](https://seedly.sg/reviews/savings-accounts/)
-        """)
-    st.divider()
+    st.header("🔗 官方政策查阅")
+    with st.expander("点击展开网址"):
+        st.markdown("[UOB One 官网](https://www.uob.com.sg/personal/save/cheque-savings/uob-one-account.page)")
+        st.markdown("[OCBC 360 官网](https://www.ocbc.com/personal-banking/deposits/360-savings-account)")
     
-    st.header("👤 财务参数设置")
-    amt = st.number_input("💰 存款总额 (SGD)", min_value=0.0, value=250000.0, step=1000.0)
-    sal = st.number_input("🏦 月薪入账 (SGD)", min_value=0.0, value=10000.0)
-    spd = st.slider("💳 月度消费 (SGD)", 0, 5000, 800)
+    st.header("👤 财务参数")
+    amt = st.number_input("💰 存款总额 (SGD)", value=250000.0)
+    sal = st.number_input("🏦 月薪入账 (SGD)", value=10000.0)
+    spd = st.slider("💳 个人总月度消费 (SGD)", 0, 3000, 1000)
     sav = st.checkbox("OCBC 360: 每月存入 ≥$500", value=True)
-    st.divider()
-    st.header("📈 定存基准调节")
-    fd_val = st.slider("当前市场定存利率 (%)", 2.0, 4.5, 3.2, 0.1)
+    fd_val = st.slider("📈 定存参考利率 (%)", 2.0, 4.5, 3.2, 0.1)
 
-# 初始化与诊断
 engine = LiveRateEngine(fd_val)
 engine.sync_rates()
 
-if st.button("🚀 生成最优资产分配清单", use_container_width=True):
-    alloc, u_i, o_i, f_i, best = smart_allocate(amt, sal, spd, sav, engine)
-    total_i = u_i + o_i + f_i
-
-    # 指标看板
+if st.button("🚀 生成分配清单", use_container_width=True):
+    alloc, u_i, o_i, f_i, best, u_s, o_s = smart_allocate(amt, sal, spd, sav, engine)
+    
     c1, c2 = st.columns(2)
-    c1.metric("年度预计利息", f"${total_i:,.2f}")
-    c2.metric("综合年化收益率", f"{(total_i/amt)*100:.2f}%")
+    c1.metric("年度预计利息", f"${u_i + o_i + f_i:,.2f}")
+    c2.metric("综合年化收益", f"{((u_i + o_i + f_i)/amt)*100:.2f}%")
 
-    st.success(f"🏆 **决策建议**：当前第一优先级应存入 **{best}**")
+    st.subheader("📍 资金分布建议")
+    st.table(pd.DataFrame([
+        {"项目": "UOB One", "金额": f"${alloc['UOB']:,.0f}", "预估利息": f"${u_i:,.2f}"},
+        {"项目": "OCBC 360", "金额": f"${alloc['OCBC']:,.0f}", "预估利息": f"${o_i:,.2f}"},
+        {"项目": "定存 / T-Bills", "金额": f"${alloc['FD']:,.0f}", "预估利息": f"${f_i:,.2f}"}
+    ]))
 
-    # 表格展示
-    df_res = pd.DataFrame([
-        {"项目": "UOB One (150k限额)", "存放金额": f"${alloc['UOB']:,.0f}", "预估利息": f"${u_i:,.2f}"},
-        {"项目": "OCBC 360 (100k限额)", "存放金额": f"${alloc['OCBC']:,.0f}", "预估利息": f"${o_i:,.2f}"},
-        {"项目": "定存 / T-Bills", "存放金额": f"${alloc['FD']:,.0f}", "预估利息": f"${f_i:,.2f}"}
-    ])
-    st.table(df_res)
+    # --- 核心：消费分配说明区 ---
+    st.subheader("💳 信用卡刷卡方案")
+    col_u, col_o = st.columns(2)
+    with col_u:
+        st.info(f"**UOB 卡刷卡**: ${u_s:.0f}")
+        if u_s < 500: st.error("❌ 消费不足 $500")
+        else: st.success("✅ 奖励已激活")
+    with col_o:
+        st.info(f"**OCBC 卡刷卡**: ${o_s:.0f}")
+        if o_s < 500: st.warning("⚠️ 仅获基础奖励")
+        else: st.success("✅ 消费奖励已激活")
 
-    with st.expander("💡 执行指令"):
-        st.write("1. 薪水发往 OCBC，每月对倒 $1,601 至 UOB (备注 'SALARY')。")
-        if spd < 500:
-            st.warning("⚠️ 消费不满 $500：UOB 已失效，资金已重定向至定存。")
-
-if datetime.now().month == 4:
-    st.warning("📅 5月1日调息预警：系统将自动同步官网数据。您可以点击侧边栏链接手动核实官方公告。")
+    with st.expander("💡 为什么这么分配？(逻辑摘要)"):
+        st.write(f"1. 系统优先分配 **$500** 给 UOB One，因为它是高息的‘入场券’。")
+        st.write(f"2. 剩余的 **${o_s:.0f}** 分配给 OCBC 360。")
+        st.write(f"3. 如果总消费不足 $500，算法会自动判定 UOB 无效并转向定存比价。")
