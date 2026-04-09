@@ -75,27 +75,27 @@ def smart_allocate(total_amt, sal, total_spd, sav, engine):
     return (alloc, ui + oi + fi)
 
 # ==========================================
-# 3. UI 交互与审计报告
+# 3. UI 与 修正后的审计逻辑
 # ==========================================
 st.set_page_config(page_title="SG WealthGuard PRO", layout="centered")
 st.title("🇸🇬 SG WealthGuard PRO")
 
 with st.sidebar:
-    st.header("👤 个人基础财务")
-    amt = st.number_input("💰 准备存入的总额 (SGD)", value=250000.0)
-    sal = st.number_input("🏦 每月实发薪水 (SGD)", value=10000.0)
-    sav = st.checkbox("OCBC 360 每月增存 ≥$500", value=True)
-    fd_val = st.slider("📈 市场外部利率参考 (%)", 2.0, 4.5, 3.2, 0.1)
+    st.header("👤 基础参数")
+    amt = st.number_input("💰 存款总额 (SGD)", value=250000.0)
+    sal = st.number_input("🏦 月薪入账 (SGD)", value=10000.0)
+    sav = st.checkbox("OCBC 360 每月增存", value=True)
+    fd_val = st.slider("📈 市场利率参考 (%)", 2.0, 4.5, 3.2, 0.1)
     
     st.divider()
-    st.header("⚖️ 消费损益对冲审计")
-    spd_natural = st.number_input("🍀 平时自然消费 (SGD)", value=800)
-    spd_forced = st.number_input("🔥 强行凑单金额 (SGD)", value=1000)
+    st.header("⚖️ 损益对冲审计")
+    spd_natural = st.number_input("🍀 自然消费 (SGD)", value=900)
+    spd_forced = st.number_input("🔥 凑单金额 (SGD)", value=1000)
 
 engine = LiveRateEngine(fd_val)
 engine.sync_rates()
 
-if st.button("🚀 进行深度盈亏审计", use_container_width=True):
+if st.button("🚀 进行深度审计", use_container_width=True):
     alloc_n, int_n = smart_allocate(amt, sal, spd_natural, sav, engine)
     alloc_f, int_f = smart_allocate(amt, sal, spd_forced, sav, engine)
     
@@ -103,45 +103,28 @@ if st.button("🚀 进行深度盈亏审计", use_container_width=True):
     extra_cost = spd_forced - spd_natural
     net_impact = monthly_gain - extra_cost
 
-    # --- 审计结论 ---
     st.subheader("🧐 审计结论")
-    if net_impact > 0:
-        st.success(f"**【建议凑单】** 凑单到 ${spd_forced} 是划算的！多拿的利息不仅覆盖了多花的 ${extra_cost}，还让你每月额外净赚 **${net_impact:.2f}**。")
-        final_alloc, final_int = alloc_f, int_f
-        final_spd = spd_forced
-    else:
-        st.error(f"**【不要凑单】** 这是一笔亏本买卖！为了多拿 ${monthly_gain:.2f} 利息，你多花了 ${extra_cost}，相当于每月倒贴 **${abs(net_impact):.2f}**。建议维持自然消费 **${spd_natural}**。")
-        final_alloc, final_int = alloc_n, int_n
-        final_spd = spd_natural
-
-    # --- 对比细节 (修复 TypeError) ---
-    st.write("---")
-    col1, col2 = st.columns(2)
-    # 方案 A
-    col1.metric(
-        label=f"自然方案 (${spd_natural})", 
-        value=f"${int_n:,.2f} /年"
-    )
-    # 方案 B (将 delta 改为数值)
-    col2.metric(
-        label=f"凑单方案 (${spd_forced})", 
-        value=f"${int_f:,.2f} /年", 
-        delta=round(int_f - int_n, 2)
-    )
-
-    # --- 最终执行表格 ---
-    st.subheader("📍 最终推荐资产分布")
-    st.caption(f"已根据审计结论，自动切换至{'凑单' if net_impact > 0 else '自然'}模式 (月均刷卡: ${final_spd})")
     
+    # 逻辑修正：考虑盈亏平衡点
+    if net_impact > 0.01: # 赚超过1分钱才叫赚
+        st.success(f"**【建议凑单】** 划算！每月利息增量 **${monthly_gain:.2f}** 超过了额外消费 **${extra_cost:.2f}**，每月净收益 **${net_impact:.2f}**。")
+        final_alloc, final_spd = alloc_f, spd_forced
+    elif abs(net_impact) <= 0.01:
+        st.warning(f"**【不建议凑单】** 盈亏平衡。多拿的 **${monthly_gain:.2f}** 利息刚好被多花的钱抵消。考虑到现金流，建议维持自然消费 **${spd_natural}**。")
+        final_alloc, final_spd = alloc_n, spd_natural
+    else:
+        st.error(f"**【不要凑单】** 亏损买卖！为了多拿 **${monthly_gain:.2f}** 利息，你多花了 **${extra_cost:.2f}**，每月纯亏 **${abs(net_impact):.2f}**。建议维持自然消费 **${spd_natural}**。")
+        final_alloc, final_spd = alloc_n, spd_natural
+
+    st.write("---")
+    c1, c2 = st.columns(2)
+    c1.metric(f"自然方案 (${spd_natural})", f"${int_n:,.2f} /年")
+    # 修复 TypeError: 确保 delta 是纯数值
+    c2.metric(f"凑单方案 (${spd_forced})", f"${int_f:,.2f} /年", delta=round(int_f - int_n, 2))
+
+    st.subheader("📍 执行资产分布建议")
     st.table(pd.DataFrame([
-        {"存放账户": "UOB One (150k)", "建议金额": f"${final_alloc['UOB']:,.0f}"},
-        {"存放账户": "OCBC 360 (100k)", "建议金额": f"${final_alloc['OCBC']:,.0f}"},
-        {"存放账户": "外部定存 / T-Bills", "建议金额": f"${final_alloc['FD']:,.0f}"}
+        {"存放账户": "UOB One", "本金": f"${final_alloc['UOB']:,.0f}"},
+        {"存放账户": "OCBC 360", "本金": f"${final_alloc['OCBC']:,.0f}"},
+        {"存放账户": "外部定存 / T-Bills", "本金": f"${final_alloc['FD']:,.0f}"}
     ]))
-
-    with st.expander("🔗 官方数据验证"):
-        st.markdown("[UOB One](https://www.uob.com.sg/personal/save/cheque-savings/uob-one-account.page)")
-        st.markdown("[OCBC 360](https://www.ocbc.com/personal-banking/deposits/360-savings-account)")
-
-if datetime.now().month == 4:
-    st.warning("📅 5月1日调息预警。")
